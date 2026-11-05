@@ -1,0 +1,529 @@
+-- SYSTEM MENU v1.9 | Delta Executor
+-- Menu na direita com: teleportar, marcar renascimento, reiniciar ao levar dano e bússola.
+
+--// SERVIÇOS
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ========== CONFIGURAÇÃO ==========
+local TITULO = "SYSTEM MENU v1.9"
+
+local MENU = {
+	largura = 175,
+	altura = 200,
+	posicao = UDim2.new(1, -200, 0, 8), -- DIREITA: 25px da borda direita | Y=8
+	raio = 12,
+	transparencia = 0.05,
+}
+
+local BARRA = {altura = 28, transparencia = 0.3}
+
+local DANO = {graca = 0.3} -- segundos após nascer em que o dano ainda não reinicia
+
+-- Botão TELEPORTAR: sempre vai para esta posição fixa
+local LOCAL_TELEPORTE = Vector3.new(-118.3, 456.8, -253.1)
+
+-- Renascer no local marcado: por quantos segundos o script te segura no ponto
+-- depois de nascer, para o jogo não te devolver ao spawn dele
+local RENASCER = {
+	segurar = 1.5,     -- segundos vigiando se o jogo te puxa de volta ao spawn
+	afastamento = 4,   -- distância (studs) do ponto que conta como "puxado de volta"
+	fade = 0.2,        -- segundos até tirar a capa preta depois de teleportar
+}
+
+local COR = {
+	fundo = Color3.fromRGB(15, 15, 25),
+	card = Color3.fromRGB(25, 25, 40),
+	texto = Color3.fromRGB(255, 255, 255),
+	sub = Color3.fromRGB(150, 150, 180),
+	azul = Color3.fromRGB(0, 150, 255),
+	laranja = Color3.fromRGB(255, 150, 0),
+	verde = Color3.fromRGB(0, 200, 100),
+	roxo = Color3.fromRGB(200, 50, 200),
+	amarelo = Color3.fromRGB(255, 220, 60),
+	cinza = Color3.fromRGB(90, 90, 110),
+	on = Color3.fromRGB(0, 180, 80),
+	onTexto = Color3.fromRGB(0, 110, 50),
+	fechar = Color3.fromRGB(200, 50, 50),
+	minimizar = Color3.fromRGB(200, 150, 0),
+}
+
+-- ========== ESTADO ==========
+local vivo = true
+local conexoes = {}
+local posMarcada = nil     -- Vector3 da posição marcada
+local cfMarcado = nil      -- CFrame marcado (posição + para onde você olha, em pé)
+local reiniciarOn = false  -- reiniciar ao levar dano
+local renascerOn = false   -- renascer no local marcado (ligado ao marcar, desliga no interruptor)
+local conexaoDano = nil
+
+-- ========== FUNÇÕES AUXILIARES ==========
+local function ligar(sinal, fn)
+	local c = sinal:Connect(fn)
+	table.insert(conexoes, c)
+	return c
+end
+
+local function criar(classe, props, pai)
+	local obj = Instance.new(classe)
+	for k, v in pairs(props) do obj[k] = v end
+	obj.Parent = pai
+	return obj
+end
+
+local function arredondar(obj, raio)
+	criar("UICorner", {CornerRadius = UDim.new(0, raio or 8)}, obj)
+end
+
+local function efeitoClique(obj)
+	local escala = obj:FindFirstChild("UIScale") or criar("UIScale", {}, obj)
+	TweenService:Create(escala, TweenInfo.new(0.08), {Scale = 1.1}):Play()
+	task.delay(0.08, function()
+		TweenService:Create(escala, TweenInfo.new(0.08), {Scale = 1}):Play()
+	end)
+end
+
+local function arrastar(handle, alvo)
+	local ativo, inicio, posIni = false, nil, nil
+	handle.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.Touch
+			or i.UserInputType == Enum.UserInputType.MouseButton1 then
+			ativo, inicio, posIni = true, i.Position, alvo.Position
+			i.Changed:Connect(function()
+				if i.UserInputState == Enum.UserInputState.End then ativo = false end
+			end)
+		end
+	end)
+	ligar(UIS.InputChanged, function(i)
+		if ativo and (i.UserInputType == Enum.UserInputType.Touch
+			or i.UserInputType == Enum.UserInputType.MouseMovement) then
+			local d = i.Position - inicio
+			alvo.Position = UDim2.new(posIni.X.Scale, posIni.X.Offset + d.X,
+				posIni.Y.Scale, posIni.Y.Offset + d.Y)
+		end
+	end)
+end
+
+local function getHRP()
+	local char = LocalPlayer.Character
+	return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+-- ========== JANELA ==========
+local nomeGui = "TemaMenu"
+local function pegarPai()
+	local ok, pai = pcall(function() return (gethui and gethui()) or game:GetService("CoreGui") end)
+	return ok and pai or LocalPlayer:WaitForChild("PlayerGui")
+end
+local paiGui = pegarPai()
+local antigo = paiGui:FindFirstChild(nomeGui)
+if antigo then antigo:Destroy() end -- evita menu duplicado ao executar de novo
+
+local gui = criar("ScreenGui", {Name = nomeGui, ResetOnSpawn = false, DisplayOrder = 10}, paiGui)
+
+-- Capa preta: cobre a tela enquanto você morre/nasce, para você não ver o spawn do jogo
+local nomeCapa = "TemaCobertura"
+local capaAntiga = paiGui:FindFirstChild(nomeCapa)
+if capaAntiga then capaAntiga:Destroy() end
+local guiCapa = criar("ScreenGui", {
+	Name = nomeCapa, ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 5,
+}, paiGui)
+local capa = criar("Frame", {
+	Size = UDim2.new(1, 0, 1, 0),
+	BackgroundColor3 = Color3.new(0, 0, 0),
+	BorderSizePixel = 0,
+	Visible = false,
+}, guiCapa)
+
+local main = criar("Frame", {
+	Size = UDim2.new(0, MENU.largura, 0, MENU.altura),
+	Position = MENU.posicao,
+	BackgroundColor3 = COR.fundo,
+	BackgroundTransparency = MENU.transparencia,
+	BorderSizePixel = 0,
+}, gui)
+arredondar(main, MENU.raio)
+criar("UIStroke", {Color = COR.azul, Thickness = 2}, main)
+
+-- ========== BARRA SUPERIOR ==========
+local barra = criar("Frame", {
+	Size = UDim2.new(1, 0, 0, BARRA.altura),
+	BackgroundColor3 = COR.card,
+	BackgroundTransparency = BARRA.transparencia,
+	BorderSizePixel = 0,
+}, main)
+arredondar(barra, MENU.raio)
+
+local titulo = criar("TextLabel", {
+	Size = UDim2.new(1, -55, 1, 0),
+	Position = UDim2.new(0, 8, 0, 0),
+	BackgroundTransparency = 1,
+	Text = TITULO,
+	TextColor3 = COR.texto,
+	TextScaled = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Font = Enum.Font.SourceSansBold,
+}, barra)
+criar("UITextSizeConstraint", {MaxTextSize = 14}, titulo)
+
+local function botaoBarra(texto, x, cor)
+	local b = criar("TextButton", {
+		Size = UDim2.new(0, 20, 0, 20),
+		Position = x,
+		BackgroundColor3 = cor,
+		Text = texto,
+		TextColor3 = COR.texto,
+		TextSize = 13,
+		Font = Enum.Font.SourceSansBold,
+	}, barra)
+	arredondar(b, 6)
+	return b
+end
+
+local btnFechar = botaoBarra("X", UDim2.new(1, -23, 0, 4), COR.fechar)
+local btnMinimizar = botaoBarra("–", UDim2.new(1, -45, 0, 4), COR.minimizar)
+
+arrastar(barra, main)
+
+-- ========== CORPO (lista com rolagem) ==========
+local corpo = criar("Frame", {
+	Size = UDim2.new(1, 0, 1, -BARRA.altura),
+	Position = UDim2.new(0, 0, 0, BARRA.altura),
+	BackgroundTransparency = 1,
+	ClipsDescendants = true,
+}, main)
+
+local lista = criar("ScrollingFrame", {
+	Size = UDim2.new(1, -10, 1, -8),
+	Position = UDim2.new(0, 5, 0, 4),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 3,
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	CanvasSize = UDim2.new(),
+}, corpo)
+criar("UIListLayout", {
+	Padding = UDim.new(0, 4),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+}, lista)
+
+local function novoBotao(ordem, texto, cor)
+	local btn = criar("TextButton", {
+		Size = UDim2.new(1, -6, 0, 30),
+		LayoutOrder = ordem,
+		BackgroundColor3 = COR.card,
+		BorderSizePixel = 0,
+		Text = texto,
+		TextColor3 = COR.texto,
+		TextScaled = true,
+		Font = Enum.Font.SourceSansBold,
+		AutoButtonColor = false,
+	}, lista)
+	arredondar(btn, 6)
+	criar("UIStroke", {Color = cor or COR.azul, Thickness = 1.5}, btn)
+	criar("UITextSizeConstraint", {MaxTextSize = 12}, btn)
+	btn.MouseButton1Click:Connect(function() efeitoClique(btn) end)
+	return btn
+end
+
+-- Interruptor ON/OFF (pílula verde com bolinha branca / cinza)
+local function novoInterruptor(ordem, texto, cor, aoMudar)
+	local linha = criar("TextButton", {
+		Size = UDim2.new(1, -6, 0, 34),
+		LayoutOrder = ordem,
+		BackgroundColor3 = COR.card,
+		BorderSizePixel = 0,
+		Text = "",
+		AutoButtonColor = false,
+	}, lista)
+	arredondar(linha, 6)
+	criar("UIStroke", {Color = cor or COR.azul, Thickness = 1.5}, linha)
+
+	criar("TextLabel", {
+		Size = UDim2.new(1, -62, 1, 0),
+		Position = UDim2.new(0, 8, 0, 0),
+		BackgroundTransparency = 1,
+		Text = texto,
+		TextColor3 = COR.texto,
+		TextSize = 12,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.SourceSansBold,
+	}, linha)
+
+	local trilho = criar("Frame", {
+		Size = UDim2.new(0, 46, 0, 22),
+		Position = UDim2.new(1, -52, 0.5, -11),
+		BackgroundColor3 = COR.cinza,
+		BorderSizePixel = 0,
+	}, linha)
+	arredondar(trilho, 11)
+
+	local rotulo = criar("TextLabel", {
+		Size = UDim2.new(0, 24, 1, 0),
+		Position = UDim2.new(1, -27, 0, 0),
+		BackgroundTransparency = 1,
+		Text = "OFF",
+		TextColor3 = COR.sub,
+		TextSize = 9,
+		Font = Enum.Font.SourceSansBold,
+	}, trilho)
+
+	local bola = criar("Frame", {
+		Size = UDim2.new(0, 18, 0, 18),
+		Position = UDim2.new(0, 2, 0.5, -9),
+		BackgroundColor3 = COR.texto,
+		BorderSizePixel = 0,
+	}, trilho)
+	arredondar(bola, 9)
+
+	local ligado = false
+	local function set(estado)
+		ligado = estado
+		local info = TweenInfo.new(0.15)
+		TweenService:Create(bola, info, {
+			Position = ligado and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9),
+		}):Play()
+		TweenService:Create(trilho, info, {
+			BackgroundColor3 = ligado and COR.on or COR.cinza,
+		}):Play()
+		rotulo.Text = ligado and "ON" or "OFF"
+		rotulo.Position = ligado and UDim2.new(0, 3, 0, 0) or UDim2.new(1, -27, 0, 0)
+		rotulo.TextColor3 = ligado and COR.onTexto or COR.sub
+	end
+
+	linha.MouseButton1Click:Connect(function()
+		set(not ligado)
+		if aoMudar then aoMudar(ligado) end
+	end)
+
+	return {linha = linha, set = set}
+end
+
+-- ========== FUNÇÕES: MARCAR / TELEPORTAR ==========
+local function marcarPosicao()
+	local hrp = getHRP()
+	if not hrp then return false end
+	posMarcada = hrp.Position
+	-- CFrame reto (sem inclinar) e meio stud acima, para nascer em pé e sem entrar no chão
+	local p = hrp.Position + Vector3.new(0, 0.5, 0)
+	local olhar = hrp.CFrame.LookVector
+	cfMarcado = CFrame.new(p, p + Vector3.new(olhar.X, 0, olhar.Z))
+	return true
+end
+
+-- Teleporta para a posição fixa (LOCAL_TELEPORTE)
+local function teleportarFixo()
+	local hrp = getHRP()
+	if not hrp then return false end
+	hrp.CFrame = CFrame.new(LOCAL_TELEPORTE)
+	return true
+end
+
+-- Ao nascer: te leva rápido para o local marcado, antes de você ficar no spawn do jogo.
+-- Repete por alguns frames caso o jogo tente te mandar de volta ao spawn.
+local function renascerNoLocal(char)
+	if not renascerOn or not cfMarcado then
+		capa.Visible = false
+		return
+	end
+	capa.Visible = true -- a capa preta só aparece no instante em que você nasce
+	local hrp = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 5)
+	if not hrp then
+		capa.Visible = false
+		return
+	end
+	local alvo = cfMarcado
+	hrp.CFrame = alvo -- teleporte imediato, sem esperar nenhum frame
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	task.delay(RENASCER.fade, function() capa.Visible = false end) -- tira a capa preta
+
+	-- Só reteleporta se o jogo te puxar de volta (longe do ponto na horizontal).
+	-- Fora isso, a física fica livre: você cai e fica em pé normalmente, sem voar.
+	local fim = os.clock() + RENASCER.segurar
+	while os.clock() < fim do
+		if not vivo or not renascerOn or LocalPlayer.Character ~= char or not hrp.Parent then break end
+		local dx = hrp.Position.X - alvo.Position.X
+		local dz = hrp.Position.Z - alvo.Position.Z
+		if math.sqrt(dx * dx + dz * dz) > RENASCER.afastamento then
+			hrp.CFrame = alvo
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end
+		RunService.Heartbeat:Wait()
+	end
+end
+
+-- ========== FUNÇÃO: REINICIAR AO LEVAR DANO ==========
+-- Se a vida cair (e não for logo ao nascer), zera a vida = o personagem reinicia
+local function vigiarDano(char)
+	if conexaoDano then conexaoDano:Disconnect() end
+	local hum = char:WaitForChild("Humanoid", 5)
+	if not hum then return end
+	local nasceu = os.clock()
+	local ultima = hum.Health
+	conexaoDano = hum.HealthChanged:Connect(function(vida)
+		if reiniciarOn and vida > 0 and vida < ultima
+			and os.clock() - nasceu > DANO.graca then
+			hum.Health = 0
+		end
+		ultima = vida
+	end)
+end
+
+-- ========== INTERFACE: BOTÕES E INTERRUPTOR ==========
+local btnTeleportar = novoBotao(1, "🚀 Teleportar", COR.laranja)
+local btnMarcar = novoBotao(2, "📌 Marcar renascimento", COR.verde)
+local swRenascer = novoInterruptor(3, "Renascer no local marcado", COR.verde, function(v)
+	renascerOn = v
+end)
+novoInterruptor(4, "Reiniciar ao levar dano", COR.roxo, function(v)
+	reiniciarOn = v
+end)
+
+-- Mostra um aviso rápido no texto do botão e depois volta ao normal
+local function avisoBotao(btn, aviso, normal)
+	btn.Text = aviso
+	task.delay(1, function()
+		if btn.Parent then btn.Text = normal end
+	end)
+end
+
+-- Marcar liga o renascimento automaticamente; o interruptor serve para desativar
+btnMarcar.MouseButton1Click:Connect(function()
+	local ok = marcarPosicao()
+	if ok then
+		renascerOn = true
+		swRenascer.set(true)
+	end
+	avisoBotao(btnMarcar, ok and "✔ Marcado!" or "⚠ Sem personagem", "📌 Marcar renascimento")
+end)
+
+btnTeleportar.MouseButton1Click:Connect(function()
+	local ok = teleportarFixo()
+	avisoBotao(btnTeleportar, ok and "✔ Teleportado!" or "⚠ Sem personagem", "🚀 Teleportar")
+end)
+
+-- ========== INTERFACE: BÚSSOLA ==========
+local cartao = criar("Frame", {
+	Size = UDim2.new(1, -6, 0, 146),
+	LayoutOrder = 5,
+	BackgroundColor3 = COR.card,
+	BackgroundTransparency = 0.2,
+	BorderSizePixel = 0,
+}, lista)
+arredondar(cartao, 8)
+criar("UIStroke", {Color = COR.laranja, Thickness = 1.5}, cartao)
+
+-- Rosa dos ventos: o disco gira, o ponteiro ▼ fica fixo
+local rosa = criar("Frame", {
+	Size = UDim2.new(0, 66, 0, 66),
+	Position = UDim2.new(0, 10, 0, 22),
+	BackgroundColor3 = COR.fundo,
+	BorderSizePixel = 0,
+}, cartao)
+criar("UICorner", {CornerRadius = UDim.new(0.5, 0)}, rosa)
+criar("UIStroke", {Color = COR.azul, Thickness = 2}, rosa)
+
+criar("TextLabel", {
+	Size = UDim2.new(0, 20, 0, 14),
+	Position = UDim2.new(0.5, -10, 0, -16),
+	BackgroundTransparency = 1,
+	Text = "▼",
+	TextColor3 = COR.amarelo,
+	TextSize = 14,
+	Font = Enum.Font.SourceSansBold,
+}, rosa)
+
+local disco = criar("Frame", {
+	Size = UDim2.new(1, 0, 1, 0),
+	BackgroundTransparency = 1,
+}, rosa)
+
+local function letra(txt, x, y, cor)
+	criar("TextLabel", {
+		Size = UDim2.new(0, 16, 0, 16),
+		Position = UDim2.new(x, -8, y, -8),
+		BackgroundTransparency = 1,
+		Text = txt,
+		TextColor3 = cor,
+		TextSize = 13,
+		Font = Enum.Font.SourceSansBold,
+	}, disco)
+end
+letra("N", 0.5, 0.16, COR.fechar)
+letra("S", 0.5, 0.84, COR.texto)
+letra("L", 0.84, 0.5, COR.texto)
+letra("O", 0.16, 0.5, COR.texto)
+
+local function rotulo(texto, x, y, largura, altura, tamanho, cor)
+	return criar("TextLabel", {
+		Size = UDim2.new(0, largura, 0, altura),
+		Position = UDim2.new(0, x, 0, y),
+		BackgroundTransparency = 1,
+		Text = texto,
+		TextColor3 = cor,
+		TextSize = tamanho,
+		Font = Enum.Font.SourceSansBold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, cartao)
+end
+
+local lblDirecao = rotulo("", 86, 28, 70, 54, 20, COR.amarelo)
+local lblPos = rotulo("", 10, 96, 150, 16, 11, COR.texto)
+local lblAltura = rotulo("", 10, 112, 150, 16, 11, COR.verde)
+local lblDist = rotulo("", 10, 128, 150, 16, 11, COR.azul)
+
+local NOMES_DIRECAO = {"N", "NE", "L", "SE", "S", "SO", "O", "NO"}
+
+-- Atualiza a bússola todo frame (Norte = direção -Z do mapa)
+local function atualizarBussola()
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local olhar = cam.CFrame.LookVector
+	local grau = math.deg(math.atan2(olhar.X, -olhar.Z)) % 360
+	disco.Rotation = -grau
+
+	local indice = math.floor((grau + 22.5) / 45) % 8 + 1
+	lblDirecao.Text = string.format("%s\n%d°", NOMES_DIRECAO[indice], grau)
+
+	local hrp = getHRP()
+	if hrp then
+		local p = hrp.Position
+		lblPos.Text = string.format("X %d  Z %d", p.X, p.Z)
+		lblAltura.Text = string.format("Altura: %d", p.Y)
+		lblDist.Text = posMarcada
+			and string.format("Distância: %.1f", (p - posMarcada).Magnitude)
+			or "Distância: --"
+	else
+		lblPos.Text, lblAltura.Text, lblDist.Text = "X --  Z --", "Altura: --", "Distância: --"
+	end
+end
+
+ligar(RunService.RenderStepped, atualizarBussola)
+
+-- ========== MINIMIZAR / FECHAR ==========
+local minimizado = false
+btnMinimizar.MouseButton1Click:Connect(function()
+	minimizado = not minimizado
+	corpo.Visible = not minimizado
+	main.Size = UDim2.new(0, MENU.largura, 0, minimizado and BARRA.altura or MENU.altura)
+end)
+
+btnFechar.MouseButton1Click:Connect(function()
+	vivo = false
+	if conexaoDano then conexaoDano:Disconnect() end
+	for _, c in ipairs(conexoes) do c:Disconnect() end
+	gui:Destroy()
+	guiCapa:Destroy()
+end)
+
+-- ========== INÍCIO ==========
+if LocalPlayer.Character then task.spawn(vigiarDano, LocalPlayer.Character) end
+ligar(LocalPlayer.CharacterAdded, function(char)
+	task.spawn(renascerNoLocal, char) -- primeiro: o teleporte não pode esperar
+	task.spawn(vigiarDano, char)
+end)
